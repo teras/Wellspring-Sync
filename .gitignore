@@ -34,3 +34,6 @@ MailSync.xcodeproj/xcuserdata
 /Vendor/libetpan/config.status
 /Vendor/libetpan/libtool
 /Vendor/libetpan/build-windows/libetpan_version.h
+
+# Local build prefix for vendored libetpan (see BUILDING.md)
+/Vendor/_install/
