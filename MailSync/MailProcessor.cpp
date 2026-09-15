@@ -745,9 +745,9 @@ void MailProcessor::upsertContacts(Message * message) {
             string name = result.second.count("name") ? result.second["name"].get<string>() : "";
             string email = result.second.count("email") ? result.second["email"].get<string>() : "";
 
-            // "Mailspring Team" is used in the welcome email sent from the user's own address.
-            // Skip creating the contact to avoid saving the wrong display name.
-            if (name == "Mailspring Team" && email.find("@getmailspring.com") == string::npos) {
+            // "Wellspring Team" is the display name of the SMTP test email, sent from the user's
+            // own address. Skip creating the contact to avoid saving the wrong display name.
+            if (name == "Wellspring Team" && email.find("@getmailspring.com") == string::npos) {
                 continue;
             }
 

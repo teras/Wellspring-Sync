@@ -819,8 +819,8 @@ void SMTPSession::checkAccount(Address * from, ErrorCode * pError)
 
     // build the MIME message
     MessageBuilder builder;
-    builder.header()->setSubject(MCSTR("Mailspring SMTP Test Email"));
-    builder.header()->setUserAgent(MCSTR("Mailspring"));
+    builder.header()->setSubject(MCSTR("Wellspring SMTP Test Email"));
+    builder.header()->setUserAgent(MCSTR("Wellspring"));
     builder.header()->setDate(time(0));
 
     Address* me = Address::addressWithMailbox(from->mailbox());
@@ -833,12 +833,12 @@ void SMTPSession::checkAccount(Address * from, ErrorCode * pError)
     replyTo->addObject(me);
 
     builder.header()->setReplyTo(replyTo);
-    builder.header()->setFrom(Address::addressWithDisplayName(MCSTR("Mailspring Team"), from->mailbox()));
+    builder.header()->setFrom(Address::addressWithDisplayName(MCSTR("Wellspring Team"), from->mailbox()));
     builder.setTextBody(MCSTR(
-        "This is an email sent by Mailspring while we were testing your account config.\r\n\r\n"
+        "This is an email sent by Wellspring while we were testing your account config.\r\n\r\n"
         "As you've received it, everything must be a-ok.\r\n\r\n"
-        "Kind regards,\r\nThe Mailspring Team\r\n\r\n"
-        "P.S. a massive thank you for using Mailspring. We'll love you always!"
+        "Kind regards,\r\nThe Wellspring Team\r\n\r\n"
+        "P.S. a massive thank you for using Wellspring. We'll love you always!"
     ));
 
     // Save the message data / body we'll write to the sent folder
