@@ -166,7 +166,9 @@ string Account::SMTPVerification() {
 
 bool Account::createHelperFolders() {
     json & s = _data["settings"];
-    return s.count("create_helper_folders") ? s["create_helper_folders"].get<bool>() : true;
+    // Off by default: the only helper folder is "Snoozed", and the snooze plugin never
+    // activates in Wellspring (it requires a Mailspring identity).
+    return s.count("create_helper_folders") ? s["create_helper_folders"].get<bool>() : false;
 }
 
 string Account::constructorName() {
