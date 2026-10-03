@@ -48,6 +48,10 @@ class DAVWorker {
     // In-memory discovery cache for CalDAV
     bool calendarsDiscoveryComplete = false;
     string cachedCalendarHomeURL = "";
+    // The DAV:href of this account's own principal, retained from discovery so that
+    // runCalendars() can compare it against each calendar's DAV:owner. Empty when the
+    // server named no principal, which leaves ownership unknown rather than wrong.
+    string cachedCalPrincipalPath = "";
 
     bool validateCachedAddressBook();
 
@@ -69,6 +73,8 @@ public:
     
     void run();
     
+    string trustedWellKnownRedirect(string url, string probedHost);
+    string findWellKnownDAVHost(string service);
     shared_ptr<ContactBook> resolveAddressBook();
     string resolveCalendarHomeURL();
 
