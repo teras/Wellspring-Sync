@@ -21,6 +21,7 @@ MailSync.xcodeproj/xcuserdata
 /Makefile
 /cmake_install.cmake
 /mailsync
+/vcard_test
 
 # Vendor build directories
 /Vendor/mailcore2/build/

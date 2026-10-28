@@ -984,8 +984,7 @@ void DAVWorker::runForAddressBook(shared_ptr<ContactBook> ab) {
             string id = vcard->getUniqueId()->getValue();
             if (id == "") id = MailUtils::idForCalendar(account->id(), href);
             string email = vcard->getEmails().front()->getValue();
-            string name = vcard->getFormattedName()->getValue();
-            if (name == "") name = vcard->getName()->getValue();
+            string name = vcard->displayName();
             bool isGroup = DAVUtils::isGroupCard(vcard);
             parsed.push_back({id, etag, href, vcardString, email, name, isGroup});
         }));
@@ -1238,8 +1237,7 @@ bool DAVWorker::runForAddressBookWithSyncToken(shared_ptr<ContactBook> ab, int r
                 string id = vcard->getUniqueId()->getValue();
                 if (id == "") id = MailUtils::idForCalendar(account->id(), href);
                 string email = vcard->getEmails().front()->getValue();
-                string name = vcard->getFormattedName()->getValue();
-                if (name == "") name = vcard->getName()->getValue();
+                string name = vcard->displayName();
                 bool isGroup = DAVUtils::isGroupCard(vcard);
                 parsed.push_back({id, etag, href, vcardString, email, name, isGroup});
             }));
@@ -1367,8 +1365,7 @@ shared_ptr<Contact> DAVWorker::ingestAddressDataNode(shared_ptr<DavXML> doc, xml
     string id = vcard->getUniqueId()->getValue();
     if (id == "") id = MailUtils::idForCalendar(account->id(), href);
     string email = vcard->getEmails().front()->getValue();
-    string name = vcard->getFormattedName()->getValue();
-    if (name == "") name = vcard->getName()->getValue();
+    string name = vcard->displayName();
     
     auto contact = store->find<Contact>(Query().equal("id", id));
     if (!contact) {
@@ -1415,7 +1412,7 @@ void DAVWorker::rebuildContactGroup(shared_ptr<Contact> contact) {
     }
     // vcard3 members / icloud
     for (const auto & prop : vcard->getExtendedProperties()) {
-        if (prop->getName()!= X_VCARD3_MEMBER) continue;
+        if (prop->baseName() != X_VCARD3_MEMBER) continue;
         string mid = prop->getValue();
         if (mid.find("urn:uuid:") == 0) {
             mid = mid.substr(9);
@@ -2371,25 +2368,28 @@ shared_ptr<DavXML> DAVWorker::performXMLRequest(string _url, string method, stri
     //   curl_easy_setopt(curl_handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
     // for detected Baikal servers (hostname containing "baikal").
 
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, getAuthorizationHeader().c_str());
-    headers = curl_slist_append(headers, "Prefer: return-minimal");
-    headers = curl_slist_append(headers, "Content-Type: application/xml; charset=utf-8");
+    // Note: fetched before allocating requestData, because an OAuth token refresh can throw.
+    string authorization = getAuthorizationHeader();
+    CurlRequestData *requestData = new CurlRequestData();
+    requestData->headers = curl_slist_append(requestData->headers, authorization.c_str());
+    requestData->headers = curl_slist_append(requestData->headers, "Prefer: return-minimal");
+    requestData->headers = curl_slist_append(requestData->headers, "Content-Type: application/xml; charset=utf-8");
     // Note: Do NOT set Accept: text/vcard here. WebDAV REPORT/PROPFIND responses are always
     // XML (207 Multi-Status). Setting Accept: text/vcard confuses some servers into returning
     // raw vCard text or an empty multistatus instead of the expected XML response. The vCard
     // format preference for embedded carddav:address-data should be set via XML request body
     // attributes, not via the HTTP Accept header.
     string depthHeader = "Depth: " + depth;
-    headers = curl_slist_append(headers, depthHeader.c_str());
+    requestData->headers = curl_slist_append(requestData->headers, depthHeader.c_str());
 
-    CURL * curl_handle = curl_easy_init();
+    CURL * curl_handle = CreateCurlHandle();
     const char * payloadChars = payload.c_str();
     curl_easy_setopt(curl_handle, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 40);
     curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, method.c_str());
-    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, requestData->headers);
     curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payloadChars);
+    curl_easy_setopt(curl_handle, CURLOPT_PRIVATE, requestData);
 
     // Capture response headers for Retry-After extraction
     capturedHeaders.clear();
@@ -2397,6 +2397,7 @@ shared_ptr<DavXML> DAVWorker::performXMLRequest(string _url, string method, stri
 
     try {
         string result = PerformRequest(curl_handle);
+        CleanupCurlRequest(curl_handle);
         recordRequestSuccess();
         return make_shared<DavXML>(result, url);
     } catch (const SyncException& e) {
@@ -2414,22 +2415,25 @@ shared_ptr<DavXML> DAVWorker::performXMLRequest(string _url, string method, stri
 string DAVWorker::performVCardRequest(string _url, string method, string vcard, ETAG existingEtag) {
     string url = _url.find("http") != 0 ? "https://" + _url : _url;
     
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, getAuthorizationHeader().c_str());
-    headers = curl_slist_append(headers, "Content-Type: text/vcard; charset=utf-8");
-    headers = curl_slist_append(headers, "Accept: text/vcard; version=4.0");
+    // Note: fetched before allocating requestData, because an OAuth token refresh can throw.
+    string authorization = getAuthorizationHeader();
+    CurlRequestData *requestData = new CurlRequestData();
+    requestData->headers = curl_slist_append(requestData->headers, authorization.c_str());
+    requestData->headers = curl_slist_append(requestData->headers, "Content-Type: text/vcard; charset=utf-8");
+    requestData->headers = curl_slist_append(requestData->headers, "Accept: text/vcard; version=4.0");
     if (existingEtag != "") {
         string etagHeader = "If-Match: " + existingEtag;
-        headers = curl_slist_append(headers, etagHeader.c_str());
+        requestData->headers = curl_slist_append(requestData->headers, etagHeader.c_str());
     }
 
-    CURL * curl_handle = curl_easy_init();
+    CURL * curl_handle = CreateCurlHandle();
     const char * payloadChars = vcard.c_str();
     curl_easy_setopt(curl_handle, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 40);
     curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, method.c_str());
-    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, requestData->headers);
     curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payloadChars);
+    curl_easy_setopt(curl_handle, CURLOPT_PRIVATE, requestData);
     
     if (MailUtils::isVerboseLoggingEnabled()) {
         logger->info("{}: {} {}", _url, vcard, existingEtag);
@@ -2437,29 +2441,33 @@ string DAVWorker::performVCardRequest(string _url, string method, string vcard, 
         logger->info("{}: {} bytes etag:{}", _url, vcard.size(), existingEtag);
     }
     string result = PerformRequest(curl_handle);
+    CleanupCurlRequest(curl_handle);
     return result;
 }
 
 string DAVWorker::performICSRequest(string _url, string method, string icsData, ETAG existingEtag) {
     string url = _url.find("http") != 0 ? "https://" + _url : _url;
 
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, getAuthorizationHeader().c_str());
-    headers = curl_slist_append(headers, "Content-Type: text/calendar; charset=utf-8");
+    // Note: fetched before allocating requestData, because an OAuth token refresh can throw.
+    string authorization = getAuthorizationHeader();
+    CurlRequestData *requestData = new CurlRequestData();
+    requestData->headers = curl_slist_append(requestData->headers, authorization.c_str());
+    requestData->headers = curl_slist_append(requestData->headers, "Content-Type: text/calendar; charset=utf-8");
 
     if (existingEtag != "") {
         // For updates, use If-Match to ensure we don't overwrite concurrent changes
         string etagHeader = "If-Match: " + existingEtag;
-        headers = curl_slist_append(headers, etagHeader.c_str());
+        requestData->headers = curl_slist_append(requestData->headers, etagHeader.c_str());
     }
 
-    CURL * curl_handle = curl_easy_init();
+    CURL * curl_handle = CreateCurlHandle();
     const char * payloadChars = icsData.c_str();
     curl_easy_setopt(curl_handle, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 40);
     curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, method.c_str());
-    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, requestData->headers);
     curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payloadChars);
+    curl_easy_setopt(curl_handle, CURLOPT_PRIVATE, requestData);
 
     // The ICS body carries the event's title, attendees and description, so it only goes to
     // the log when the user has explicitly turned on verbose logging to debug a sync problem.
@@ -2469,6 +2477,7 @@ string DAVWorker::performICSRequest(string _url, string method, string icsData, 
         logger->info("performICSRequest: {} {} etag:{}, {} bytes", method, _url, existingEtag, icsData.size());
     }
     string result = PerformRequest(curl_handle);
+    CleanupCurlRequest(curl_handle);
     return result;
 }
 

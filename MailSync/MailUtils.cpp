@@ -18,6 +18,7 @@
 #include "Label.hpp"
 #include "Account.hpp"
 #include "Query.hpp"
+#include "strlib.h"
 
 #include <random>
 
@@ -263,6 +264,33 @@ string MailUtils::contactKeyForEmail(string email) {
     }
     
     return email;
+}
+
+/*
+ The display name a found-in-mail contact should carry, or "" when the header's isn't one.
+ Old Apple Mail (2006-2011) wrote the address again in angle brackets as the name, `")"`,
+ and quoted encoded-words whose decoded text keeps its quotes, and mailcore parses all of
+ them faithfully. Matches the client's ContactDisplayName helper.
+ */
+string MailUtils::contactNameFromHeader(string name, string email) {
+    name = trim(name);
+    if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+        name = trim(name.substr(1, name.size() - 2));
+    }
+
+    string bare = name;
+    if (bare.size() >= 2 && bare.front() == '<' && bare.back() == '>') {
+        bare = trim(bare.substr(1, bare.size() - 2));
+    }
+    if (toLowerCase(bare) == toLowerCase(trim(email))) {
+        return "";
+    }
+
+    // Note: any non-ASCII byte counts as a letter, so names in other scripts are kept.
+    bool hasLetterOrDigit = any_of(name.begin(), name.end(), [](unsigned char c) {
+        return c >= 0x80 || isalnum(c);
+    });
+    return hasLetterOrDigit ? name : "";
 }
 
 int MailUtils::compareEmails(void * a, void * b, void * context) {
@@ -747,9 +775,10 @@ class MailcoreSPDLogger : public ConnectionLogger {
             logTypeString = "sent";
             break;
 
+        // mailcore tags AUTH commands and their credential payloads (passwords,
+        // XOAUTH2 bearer tokens) as private; they must never reach the log.
         case ConnectionLogTypeSentPrivate:
-            logTypeString = "sent-private";
-            break;
+            return;
 
         case ConnectionLogTypeErrorParse:
             logTypeString = "error-parse";
@@ -771,28 +800,56 @@ class MailcoreSPDLogger : public ConnectionLogger {
     }
 };
 
-string MailUtils::tlsFailureAdvice(mailcore::ErrorCode err, mailcore::String * tlsErrorDescription, bool obsoleteTLSAllowed) {
+// OpenSSL reports "error:0A00018A:SSL routines::dh key too small". Only the reason
+// after the last "::" is worth showing; the full string stays in the connection log.
+static string _tlsRejectionReason(mailcore::String * tlsErrorDescription) {
     if (tlsErrorDescription == nullptr) {
         return "";
     }
-
-    // Only speak up when establishing the connection is what failed. Anything
-    // later - authentication above all - has its own cause, and a handshake
-    // reason recorded during a successful fallback would be a red herring.
-    if (err != mailcore::ErrorConnection &&
-        err != mailcore::ErrorTLSNotAvailable &&
-        err != mailcore::ErrorStartTLSNotAvailable &&
-        err != mailcore::ErrorCertificate) {
-        return "";
-    }
-
-    // OpenSSL reports "error:0A00018A:SSL routines::dh key too small". Only the
-    // reason after the last "::" is worth showing; the full string stays in the
-    // connection log.
     string reason = tlsErrorDescription->UTF8Characters();
     size_t sep = reason.rfind("::");
     if (sep != string::npos && sep + 2 < reason.size()) {
         reason = reason.substr(sep + 2);
+    }
+    return reason;
+}
+
+string MailUtils::tlsFailureAdvice(mailcore::ErrorCode err, mailcore::String * tlsErrorDescription, bool obsoleteTLSAllowed) {
+    string reason = _tlsRejectionReason(tlsErrorDescription);
+
+    // A certificate rejection carries no TLS reason string: mailcore runs checkCertificate()
+    // after the handshake has already succeeded, and IMAPSession::connect releases the
+    // description unless OpenSSL rejected the negotiation itself, so this case cannot be
+    // gated on one. It must also never point at "Allow insecure SSL", which only lowers the
+    // OpenSSL handshake security level and leaves validation on.
+    //
+    // The trust store is necessary but not always sufficient on macOS. The check there is
+    // SecPolicyCreateSSL(true, hostname), and under Apple's requirements for trusted
+    // certificates in iOS 13 / macOS 10.15 a TLS server certificate is rejected however the
+    // user has trusted it if it is SHA-1 signed, carries an RSA key under 2048 bits, has no
+    // DNS SAN, lacks the serverAuth EKU, or is valid for more than 825 days. The advice says
+    // so rather than promising that installing the certificate is always enough.
+    if (err == mailcore::ErrorCertificate) {
+        string advice = "Mailspring could not verify this server's certificate";
+        advice += reason.empty() ? string(". ") : " (" + reason + "). ";
+        advice += "If it is self-signed or issued by a private certificate authority, install it in "
+                  "your operating system's trust store (Keychain Access on macOS, the Windows "
+                  "certificate store, or the system CA directory on Linux) and reconnect - on macOS "
+                  "it must also meet Apple's current requirements for TLS server certificates. "
+                  "\"Allow insecure SSL\" does not bypass certificate validation.";
+        return advice;
+    }
+
+    // Otherwise only speak up when negotiating the connection is what failed, and only when
+    // OpenSSL said why. Anything later - authentication above all - has its own cause, and a
+    // handshake reason recorded during a successful fallback would be a red herring.
+    if (err != mailcore::ErrorConnection &&
+        err != mailcore::ErrorTLSNotAvailable &&
+        err != mailcore::ErrorStartTLSNotAvailable) {
+        return "";
+    }
+    if (reason.empty()) {
+        return "";
     }
 
     string advice = "The server rejected the secure connection (" + reason + "). ";
@@ -831,10 +888,16 @@ void MailUtils::configureSessionForAccount(IMAPSession &session, shared_ptr<Acco
     } else {
         session.setConnectionType(ConnectionType::ConnectionTypeClear);
     }
+    // Certificate validation stays enabled for every account, including this one: a
+    // self-signed certificate or a private internal CA belongs in the operating system
+    // trust store, which is where mailcore's check already looks (SecTrustEvaluate on
+    // macOS, the CryptoAPI chain engine on Windows, the OpenSSL CA paths on Linux), so the
+    // trust store is the allowlist and validation never has to be turned off. This option
+    // only lowers the OpenSSL handshake security level to 0, for undersized DH groups and
+    // legacy protocol versions. It does not weaken certificate validation, and on macOS and
+    // Windows it cannot reach it at all, because SecTrust and CryptoAPI are independent of
+    // OpenSSL. tlsFailureAdvice explains the rest to the user.
     if (account->IMAPAllowInsecureSSL()) {
-        session.setCheckCertificateEnabled(false);
-        // Also let the handshake itself fall back to OpenSSL security level 0,
-        // for servers still using SHA-1 certificates or undersized DH groups.
         session.setObsoleteTLSAllowed(true);
     }
 
@@ -875,8 +938,9 @@ void MailUtils::configureSessionForAccount(SMTPSession & session, shared_ptr<Acc
     } else {
         session.setConnectionType(ConnectionType::ConnectionTypeClear);
     }
+    // Certificate validation stays enabled here too; a self-signed certificate or private
+    // CA belongs in the operating system trust store. See the IMAP overload above.
     if (account->SMTPAllowInsecureSSL()) {
-        session.setCheckCertificateEnabled(false);
         session.setObsoleteTLSAllowed(true);
     }
 
